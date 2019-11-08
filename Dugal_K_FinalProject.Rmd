@@ -1,0 +1,329 @@
+---
+title: "Dugal_K_Project"
+author: "Kabir Dugal"
+date: "12/1/2018"
+output: html_notebook
+---
+Kabir Dugal
+DS4100 Data Collection, Integration & Analysis
+Professor Durant
+Final Project
+
+In this project, I intend to analyze pitcher data in Major League Baseball from the 2017 season. I intend to scrape data from the Lahman Baseball database project and gather data on pitchers across the league to ultimately create a model that can predictively determine a pitcher's salary. 
+The first step in doing so is to read in the data. This data was gathered using Sean Lahman's Baseball Database project. This is a collection of .csv files that contain historical baseball statistics dating back to 1871. For the purposes of this project, I intend to focus on more recent data trends, particularly the year 2016, which is the latest complete version of the project. To begin, first I import the data into R for analysis. The dataframes needed for this project are pitching statistics as well as salaries.
+```{r}
+# sets the working directory
+setwd("/Users/kabirdugal/Desktop/Northeastern University/Fall 2018/DS4100/Assignments/Project/CSVFiles")
+
+# reads in the data
+pitching <- read.csv("Pitching.csv", stringsAsFactors = FALSE)
+salaries <- read.csv("Salaries.csv", stringsAsFactors = FALSE)
+```
+After reading in the data, I need to clean it to contain only the information I need. This data will include the data for the 2016 season only. 
+```{r}
+library(dplyr)
+# filters the data using the dplyr package to include only the data for pitchers in the 2016 season
+pitching <- filter(pitching, yearID == 2016)
+# selects only the necessary columns
+pitching <- select(pitching, playerID, yearID, teamID, lgID, W, L, G, GS, CG, SHO, SV, H, ER, HR, BB, SO, BAOpp, ERA)
+# filters the data using the dplyr package to include only the salary data for players in the 2017 season
+salaries <- filter(salaries, yearID == 2016)
+
+# because the data has duplicate entries, which will interfere with the creation of the database, we have to remove entries that appear more than once for the playerID primary key.
+pitching <- pitching[!duplicated(pitching$playerID), ]
+rownames(pitching) <- 1:nrow(pitching)
+salaries <- salaries[!duplicated(salaries$playerID), ]
+rownames(salaries) <- 1:nrow(salaries)
+
+# in addition, the salaries table contains information for all players, not just pitchers
+# gets the playerID's of players with a listed salary
+playerswithsalaries <- intersect(salaries$playerID, pitching$playerID)
+salaries <- subset(salaries, salaries$playerID %in% playerswithsalaries)
+pitching <- subset(pitching, pitching$playerID %in% playerswithsalaries)
+# reset the row numbers
+rownames(pitching) <- 1:nrow(pitching)
+rownames(salaries) <- 1:nrow(salaries)
+```
+In order to connect the data, in which the connecting value is the playerID, I will need to create a relational database, from which I will upload the dataframes created here. The database baseballdb is created with the BaseballDump.sql file also submitted with this project.
+```{r}
+# imports libraries
+library(DBI)
+library(RMySQL)
+# sets the driver to be a MySQL database
+drv <- dbDriver("MySQL")
+# connects to the database
+con <- dbConnect(drv, 
+                 dbname ="baseballdb", 
+                 username = "root", 
+                 password = "wizbing111", 
+                 host = "localhost", 
+                 port = 3306)
+```
+This next set of code inserts into the database the values in both the pitching and salaries dataframes.
+```{r}
+# For some reason, dbWriteTable did not work on the system, therefore I manually insert it.
+# inserts data into the salaries table
+for (i in 1:nrow(salaries)) {
+    dbGetQuery(con, paste0("INSERT INTO salaries(yearID, teamID, lgID, playerID, salary) VALUES(",
+                            salaries$yearID[i],",'",
+                            salaries$teamID[i],"','",
+                            salaries$lgID[i],"','",
+                            salaries$playerID[i],"',",
+                            salaries$salary[i],")"))
+  }
+
+# inserts data into the pitching table
+for (i in 1:nrow(pitching)) {
+    dbGetQuery(con, paste0("INSERT INTO pitching(playerID, yearID, teamID, lgID, wins, losses, games, games_started, complete_games, shutouts, saves, hits, earnedruns, homeruns, walks, strikeouts, baopp, era) VALUES('",
+                            pitching$playerID[i],"',",
+                            pitching$yearID[i],",'",
+                            pitching$teamID[i],"','",
+                            pitching$lgID[i],"',",
+                            pitching$W[i],",",
+                            pitching$L[i],",",
+                            pitching$G[i],",",
+                            pitching$GS[i],",",
+                            pitching$CG[i],",",
+                            pitching$SHO[i],",",
+                            pitching$SV[i],",",
+                            pitching$H[i],",",
+                            pitching$ER[i],",",
+                            pitching$HR[i],",",
+                            pitching$BB[i],",",
+                            pitching$SO[i],",",
+                            pitching$BAOpp[i],",",
+                            pitching$ERA[i],")"))
+  }
+```
+After creating the relational database, where the playerID's are linked together, the next step is to retrieve the data from the database. This will be put into a dataframe where the salary of each player is also available along with the rest of the statistics. This was done using an inner join SQL query run through the dbGetQuery command to connect to MySQL.
+```{r}
+# looks at list of salaries
+salaries <- dbGetQuery(conn = con, "SELECT salary FROM salaries;")
+# fetches data from database
+data <- dbGetQuery(conn = con, "SELECT pitching.*, salaries.salary FROM pitching INNER JOIN salaries ON pitching.playerID=salaries.playerID;")
+# disconnects from the database
+dbDisconnect(conn = con)
+```
+The next step in this process is the exploration of the data. Because I intend to create a model to ultimately find the most significant variables in determining a pitcher's salary, it is important to be able to visualize the ranges of data available. The first step however, is to see which variables have an excessive amount of outliers
+```{r}
+# This function determines the outliers of variables
+findoutliers <- function(col) {
+  iqr <- IQR(col, na.rm = TRUE)
+  q3 <- quantile(col, 0.75)
+  q1 <- quantile(col, 0.25)
+  rf <- 1.5*iqr + q3
+  lf <- q1 - 1.5*iqr
+
+  count <- 0
+  
+  for (i in 1:NROW(data)) {
+    if (col[i] > rf || col[i] < lf) {
+      count <- count + 1
+    }
+  }
+  return(count)
+}
+
+findoutliers(data$wins)
+findoutliers(data$losses)
+findoutliers(data$games)
+findoutliers(data$games_started)
+findoutliers(data$complete_games) # This has a large number of outliers because pitchers specialize
+findoutliers(data$shutouts)
+findoutliers(data$saves) # This has a large number of outliers because not all pitchers are closers
+findoutliers(data$hits)
+findoutliers(data$earnedruns)
+findoutliers(data$homeruns)
+findoutliers(data$walks)
+findoutliers(data$strikeouts)
+findoutliers(data$baopp)
+findoutliers(data$era)
+findoutliers(data$salary)
+```
+I will next perform a visual analysis of the data. To begin, I aim to try and see a relationship between all the component statistic variables and the salary of a player. This is done using basic scatterplots to get a first glance idea of a basic relationship.
+```{r}
+library(ggplot2)
+# histogram for wins
+qplot(data$wins,
+      geom="histogram",
+      binwidth = 1,
+      main = "Histogram for Wins")
+
+# histogram for losses
+qplot(data$losses,
+      geom="histogram",
+      binwidth = 1,
+      main = "Histogram for Losses")
+
+# histogram for games
+qplot(data$games,
+      geom="histogram",
+      binwidth = 6,
+      main = "Histogram for Games")
+
+# histogram for earned runs
+qplot(data$earnedruns,
+      geom="histogram",
+      binwidth = 6,
+      main = "Histogram for Earned Runs")
+
+# histogram for ERA
+qplot(data$era,
+      geom="histogram",
+      binwidth = 1.5,
+      main = "Histogram for ERA")
+```
+
+```{r}
+# scatterplot of wins versus salary
+ggplot(data, aes(x=wins, y=salary)) + geom_point() + geom_smooth(method="lm") + labs(title="Wins Vs Salary", y="Salary", x="Wins", caption="Lahman Database")
+# scatterplot of losses versus salary
+ggplot(data, aes(x=losses, y=salary)) + geom_point() + geom_smooth(method="lm") + labs(title="Losses Vs Salary", y="Salary", x="Losses", caption="Lahman Database")
+# scatterplot of games versus salary
+ggplot(data, aes(x=games, y=salary)) + geom_point() + geom_smooth(method="lm") + labs(title="Games Vs Salary", y="Salary", x="Games", caption="Lahman Database")
+# scatterplot of games started versus salary
+ggplot(data, aes(x=games_started, y=salary)) + geom_point() + geom_smooth(method="lm") + labs(title="Games Started Vs Salary", y="Salary", x="Games Started", caption="Lahman Database")
+# scatterplot of complete games versus salary
+ggplot(data, aes(x=complete_games, y=salary)) + geom_point() + geom_smooth(method="lm") + labs(title="Complete Games Vs Salary", y="Salary", x="Complete Games", caption="Lahman Database")
+# scatterplot of earned runs versus salary
+ggplot(data, aes(x=earnedruns, y=salary)) + geom_point() + geom_smooth(method="lm") + labs(title="Earned Runs Vs Salary", y="Salary", x="Earned Runs", caption="Lahman Database")
+# scatterplot of hits versus salary
+ggplot(data, aes(x=hits, y=salary)) + geom_point() + geom_smooth(method="lm") + labs(title="Hits Vs Salary", y="Salary", x="Hits", caption="Lahman Database")
+# scatterplot of walks versus salary
+ggplot(data, aes(x=walks, y=salary)) + geom_point() + geom_smooth(method="lm") + labs(title="Walks Vs Salary", y="Salary", x="Walks", caption="Lahman Database")
+# scatterplot of homeruns versus salary
+ggplot(data, aes(x=homeruns, y=salary)) + geom_point() + geom_smooth(method="lm") + labs(title="Home Runs Vs Salary", y="Salary", x="Home Runs", caption="Lahman Database")
+# scatterplot of ERA versus salary
+ggplot(data, aes(x=era, y=salary)) + geom_point() + geom_smooth(method="lm") + labs(title="ERA Vs Salary", y="Salary", x="ERA", caption="Lahman Database")
+```
+After conducting a preliminary data exploration, I will next try and evaluate the correlation between salary and potential predictor variables. The variables I will explore are the ones that seem to be most highly correlated based on the above plots. One of the factors i found most interesting was that ERA and salary had a Pearson Moment and Spearman Rank correlation coefficient of almost 0. This is most likely the case due to the nature of the statistic - earned run average is a product of an overall team effort.
+```{r}
+# calculates the Pearson Moment for salary vs wins 
+cor(data$salary, data$wins, method = "pearson")
+# the value gotten here was equal to 0.4293141. This means that the two variables are weakly and positively correlated. 
+
+# calculates the Spearman Rank correlation coefficient for the salary vs wins
+cor(data$salary, data$wins, method = "spearman")
+# the value gotten here was equal to 0.3112795. This means that the two variables are weakly and positively correlated. 
+
+# calculates the Pearson Moment for salary vs earned runs 
+cor(data$salary, data$earnedruns, method = "pearson")
+# the value gotten here was equal to 0.3666519 This means that the two variables are weakly and positively correlated. 
+
+# calculates the Spearman Rank correlation coefficient for the salary vs earned runs
+cor(data$salary, data$earnedruns, method = "spearman")
+# the value gotten here was equal to 0.2463885 This means that the two variables are weakly and positively correlated. 
+
+# calculates the Pearson Moment for salary vs ERA
+cor(data$salary, data$era, method = "pearson")
+# the value gotten here was equal to -0.04042641 This means that the two variables are weakly and negatively correlated. 
+
+# calculates the Spearman Rank correlation coefficient for the salary vs ERA
+cor(data$salary, data$era, method = "spearman")
+# the value gotten here was equal to -0.04006929 This means that the two variables are weakly and negatively correlated. 
+
+# Next, I will take a sample of the earned runs variable, run it 1000 times and then see the distribution
+# samples 20% of the Fall Score
+sample <- sample(data$earnedruns, 0.2 * NROW(data$earnedruns), replace = FALSE)
+# finds the mean of the sample
+mean(sample)
+samplings <- replicate(1000, mean(sample(data$earnedruns, 0.2 * NROW(data$earnedruns), replace = FALSE)))
+# store results of samples in a binning data frame
+bdf <- cut(samplings, 5, include.lowest = TRUE, labels = c("Very Low", "Low", "Average", "High", "Very High"))
+# Create a frequency plot of the sample means and observe the distribution.
+samplings <- data.frame(samplings)
+ggplot(samplings, aes(samplings)) +
+geom_density() + 
+  labs(title="Density plot", 
+       subtitle="Mean samples density",
+       caption="Source: Earned Runs samplings",
+       x="Earned Runs")
+```
+The next step in understanding the determinants of salary is to create a model that should be able to describe the most predictive variables of salary. To begin, I split the data up into a training (80%) and testing (20%) subset. Based on the initial linear model, which included all the variables in the regression analysis, I removed the statistically insignificant predictor variables from it, to create the final multiple regression model. This model included the variables wins, shutouts, saves, hits, earned runs and walks. It makes sense that these variables are included in the model, because all are indicators of a pitcher's success as well as their ability to be better than average. The model created ended up having a rather low accuracy rate, less than 50%. This is most likely because there are a number of factors that go into determining a player's salary. These include the ability of the player's agent to negotiate, league notoriety, historical success, etc. These intangibles make it rather difficult to completely predict what a player's salary might be, hence the lower accuracy rate.
+```{r}
+# Create Training and Test data sets
+samplesize <- floor(0.80*nrow(data))  # determines the 80% cutoff for the data set division
+set.seed(123) # sets a random seed
+train_ind <- sample(seq_len(nrow(data)), size = samplesize)
+train <- data[train_ind,] # training data set is a random 80% of the rows in the original data set
+test <- data[-train_ind,] # test data set is the remaining 20% of the rows in the original data set
+
+# train the model
+initiallinearmodel <- lm(formula = salary ~ wins + losses + games + games_started + complete_games + shutouts + saves + hits + earnedruns + homeruns + walks + strikeouts + baopp + era, data = train)
+summary(initiallinearmodel)
+
+# after looking at the p-values of the data, some of the variables are not significant, therefore they were removed from the model
+lmmodel <- lm(formula = salary ~ wins + shutouts + saves + hits + earnedruns + walks , data = train)
+summary(lmmodel)
+
+# prediction of salaries based on the multiple regression model
+salPred <- predict(lmmodel, test)
+actuals_preds <- data.frame(cbind(actuals=test$salary, predicteds=salPred))
+correlation_accuracy <- cor(actuals_preds)
+correlation_accuracy # 44.6%
+```
+The next step in tuning the model to give meaningful feedback is to create a logistic regression model. This will determine if a player will make above or below the league average salary of $3,995,406 for pitchers.
+```{r}
+# determine the mean salary
+lgavg <- mean(data$salary)
+# makes the binary column
+data$newcol <- 0
+
+vex <- ifelse(data$salary > lgavg, 1, 0)
+data$newcol <- vex
+# Create Training and Test data sets
+samplesize <- floor(0.80*nrow(data))  # determines the 80% cutoff for the data set division
+set.seed(100) # sets a random seed
+train_ind <- sample(seq_len(nrow(data)), size = samplesize)
+logtrain <- data[train_ind,] # training data set is a random 80% of the rows in the original data set
+logtest <- data[-train_ind,] # test data set is the remaining 20% of the rows in the original data set
+
+# constructs a logistic regression model to predict the probability of a player making above league average
+model <- glm(newcol ~ wins + losses + games + games_started + complete_games + shutouts + saves + hits + earnedruns + homeruns + walks + strikeouts + baopp + era,family=binomial(link='logit'),data=logtrain)
+summary(model)
+# the statistically significant variables are games, games_started, saves, hits, walks and strikeouts
+# recreate logistic model without insignificant variables
+logmod <- glm(newcol ~ games + games_started + saves + hits + walks + strikeouts,family=binomial(link='logit'),data=logtrain)
+summary(logmod)
+
+results <- c(predict(logmod,newdata=test,type='response'))
+# places results and predictions into a data frame
+resultsprediction <- data.frame("Actual" = logtest$newcol, "Prediction" = results)
+modelaccuracy <- function() {
+  count <- 0
+  for (i in 1:nrow(resultsprediction)) {
+    if (resultsprediction$Prediction[i] >= 0.5 && resultsprediction$Actual[i] == 1) {
+      count <- count + 1
+    }
+    else if (resultsprediction$Prediction[i] < 0.5 && resultsprediction$Actual[i] == 0) {
+      count <- count + 1
+    }
+    else {
+      count <- count
+    }
+  }
+  return(count / nrow(logtest))
+}
+modelaccuracy() # reveals model accuracy
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
